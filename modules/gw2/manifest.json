@@ -1,0 +1,2 @@
+{ "schemaVersion": 1, "id": "gw2", "name": "Guild Wars 2", "kinds": ["touchbar-module"],
+  "entryPoints": { "touchbarModule": "touchbar.py" }, "touchbarModule": { "apiVersion": 1, "order": 50 } }

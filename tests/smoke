@@ -1,0 +1,88 @@
+#!/bin/sh
+# smoke: the whole thing without the Touch Bar or GW2. Config tests, then the feed with fake game data,
+# the bar headless, a screenshot of every page, a tap on each page, and the settings app photographing
+# itself on every tab. Fails on any traceback or an empty page. Shots land in tests/shots for a look.
+#   tests/smoke            OUT=<dir> for the shots elsewhere, NOGUI=1 skips the settings app, KEEP=1 keeps logs
+# Everything lives in a temp dir, your real config, playtime and runtime files stay untouched.
+set -u
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+CLI=${CLI:-$HOME/src/macarchy-touchbar/bin/macarchy-touchbar}
+T=$(mktemp -d /tmp/gtbXXXX)          # short: AF_UNIX paths max out at 108 bytes
+OUT=${OUT:-$REPO/tests/shots}
+mkdir -p "$OUT" "$T/run"
+fail=0
+bad() { echo "FAIL  $*"; fail=1; }
+
+export GW2TB_RUN=$T/run/gw2-touchbar GW2TB_CONFIG=$T/config.toml GW2TB_DATA=$T/data \
+       GW2TB_CACHE=$T/names.json GW2TB_WEBCACHE=$T/web GW2TB_FAKE=$REPO/tests/fake-wvw.json
+
+cleanup() {
+    [ -n "${BAR:-}" ] && kill "$BAR" 2>/dev/null
+    [ -n "${FEED:-}" ] && kill "$FEED" 2>/dev/null
+    wait 2>/dev/null
+    [ -z "${KEEP:-}" ] && rm -rf "$T"
+}
+trap cleanup EXIT INT TERM
+
+echo "== config"
+python3 "$REPO/tests/test_config.py" || fail=1
+
+echo "== feed and bar"
+python3 -c "import sys; sys.path.insert(0, '$REPO'); from gw2tb import config; config.save(config.normalize({}))"
+XDG_RUNTIME_DIR=$T/run python3 "$REPO/gw2-touchbar-feed" >"$T/feed.log" 2>&1 & FEED=$!
+XDG_RUNTIME_DIR=$T/run python3 "$REPO/gw2-touchbar" --headless >"$T/bar.log" 2>&1 & BAR=$!
+ctl() { XDG_RUNTIME_DIR=$T/run python3 "$CLI" "$@"; }
+
+for _ in $(seq 40); do                               # up to 8 s for the socket and the first state
+    [ -S "$T/run/macarchy-touchbar/sock" ] && [ -f "$GW2TB_RUN/state.json" ] && break
+    sleep 0.2
+done
+[ -f "$GW2TB_RUN/state.json" ] || bad "feed wrote no state.json"
+[ -S "$T/run/macarchy-touchbar/sock" ] || bad "bar has no IPC socket"
+sleep 3                                              # one more feed round and a redraw
+
+pages=$(python3 -c "import sys; sys.path.insert(0, '$REPO'); from gw2tb import config; print(len(config.load()['pages']))")
+i=0
+while [ "$i" -lt "$pages" ]; do
+    ctl page "$i" >/dev/null 2>&1 || ctl page "$i"
+    sleep 0.5
+    ctl screenshot "$OUT/page$i.png" >/dev/null || bad "screenshot of page $i"
+    ctl touch 300,30 >/dev/null 2>&1                 # a tap somewhere on the left half, must not crash
+    sleep 0.3
+    python3 - "$OUT/page$i.png" <<'EOF' || bad "page $i looks empty"
+import sys, cairo
+s = cairo.ImageSurface.create_from_png(sys.argv[1])
+data, w, h, st = bytes(s.get_data()), s.get_width(), s.get_height(), s.get_stride()
+bg = data[0:4]
+lit = sum(1 for y in range(0, h, 2) for x in range(0, w, 4) if data[y * st + x * 4:y * st + x * 4 + 4] != bg)
+sys.exit(0 if lit > 200 else 1)
+EOF
+    echo "ok    page $i"
+    i=$((i + 1))
+done
+ctl next >/dev/null 2>&1; ctl prev >/dev/null 2>&1
+kill -0 "$BAR" 2>/dev/null || bad "bar died"
+kill -0 "$FEED" 2>/dev/null || bad "feed died"
+
+echo "== settings app"
+sid=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$(id -un)" '$3==u {print $1; exit}')
+locked=$(loginctl show-session "$sid" -p LockedHint --value 2>/dev/null)
+if [ "$locked" = yes ]; then
+    echo "skip  screen locked, KWin draws no windows behind the lock screen"
+elif [ -z "${NOGUI:-}" ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
+    for tab in layout settings online keys; do
+        GW2TB_TAB=$tab GW2TB_SHOT=$OUT/settings-$tab.png timeout 20 python3 "$REPO/gw2-touchbar-settings" \
+            >"$T/settings-$tab.log" 2>&1
+        [ -s "$OUT/settings-$tab.png" ] && echo "ok    settings $tab" || bad "settings tab $tab"
+    done
+else
+    echo "skip  no display"
+fi
+
+for log in "$T"/*.log; do
+    if grep -q "Traceback\|Error" "$log"; then
+        bad "$(basename "$log")"; grep -B2 -A8 "Traceback\|Error" "$log" | head -30
+    fi
+done
+[ "$fail" = 0 ] && echo "PASS  shots in $OUT" || { echo "logs in $T"; KEEP=1; }
+exit "$fail"

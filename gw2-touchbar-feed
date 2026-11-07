@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""gw2-touchbar-feed: the Touch Bar's data, gathered as the desktop user (see gw2tb/feed.py).
+Runs as the systemd user service gw2-touchbar-feed.service; idle while GW2 isn't running."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from gw2tb.feed import Feed     # noqa: E402
+
+if __name__ == "__main__":
+    Feed().run()

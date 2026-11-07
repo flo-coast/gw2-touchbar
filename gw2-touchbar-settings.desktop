@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=GW2 Touch Bar
+Comment=Pages and panels for the Guild Wars 2 Touch Bar
+Exec=/usr/local/bin/gw2-touchbar-settings
+Icon=input-touchpad
+Categories=Settings;Game;

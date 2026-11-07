@@ -1,0 +1,12 @@
+[Unit]
+Description=Data for the GW2 Touch Bar (idle until Guild Wars 2 runs)
+# No [Install]: gw2-touchbar-settings starts it with the bar and it quits once the app is closed.
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/lib/gw2-touchbar/gw2-touchbar-feed
+Environment=GW2TB_CACHE=%h/.cache/gw2-touchbar/names.json
+Nice=5
+Restart=on-failure
+RestartSec=10
+

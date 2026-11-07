@@ -1,0 +1,60 @@
+#!/bin/bash
+# hwtest [seconds] [--partial]: drives the real Touch Bar with fake GW2 data and a stream of taps,
+# then gives it back to tiny-dfr and reports appletbdrm errors (PASS/FAIL). Unfreezes the bar on FAIL.
+# Root only; installed root-owned so a sudoers rule can allow exactly this. Refuses while GW2 runs.
+# Taps only Keys (open/close) and the combat timer: nothing that sends keys to the focused window.
+set -u
+[ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
+SECS=60 PARTIAL=
+for a in "$@"; do
+    case $a in
+        --partial) PARTIAL=1 ;;
+        ''|*[!0-9]*) echo "usage: hwtest [seconds] [--partial]" >&2; exit 2 ;;
+        *) SECS=$a ;;
+    esac
+done
+[ "$SECS" -ge 10 ] && [ "$SECS" -le 600 ] || { echo "seconds: 10 to 600" >&2; exit 2; }
+pgrep -x Gw2-64.exe >/dev/null && { echo "GW2 is running, leaving the bar alone" >&2; exit 3; }
+
+LIB=/usr/local/lib/gw2-touchbar
+RUN=/run/gw2-touchbar-test
+install -d -m 700 "$RUN"
+SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+systemctl stop gw2-touchbar          # its ExecStopPost starts tiny-dfr, so stop that after
+systemctl stop tiny-dfr
+sleep 0.5
+systemctl is-active -q tiny-dfr && { echo "tiny-dfr would not stop" >&2; systemctl start gw2-touchbar; exit 4; }
+
+export XDG_RUNTIME_DIR=$RUN GW2TB_CONFIG=$LIB/tests/hwtest.toml     # fixed layout: the taps below hit Keys and combat
+export GW2TB_USER=${SUDO_USER:?run with sudo} MACARCHY_TOUCHBAR_DATA=$LIB/engine
+[ -n "$PARTIAL" ] && export GW2TB_PARTIAL=1
+python3 "$LIB/gw2-touchbar" --hw-test "$SECS" > "$RUN/engine.log" 2>&1 &
+ENG=$!
+sleep 3
+taps=0 end=$((SECONDS + SECS - 5))
+while [ $SECONDS -lt $end ] && kill -0 $ENG 2>/dev/null; do
+    for xy in 1610,30 1610,30 590,30; do       # Keys open, Keys close, combat timer
+        python3 "$LIB/engine/cli" touch $xy >/dev/null 2>&1 && taps=$((taps + 1))
+        sleep 0.15
+    done
+done
+wait $ENG
+ENG_RC=$?
+systemctl start tiny-dfr
+sleep 3
+
+echo "== engine (${SECS}s, $([ -n "$PARTIAL" ] && echo partial || echo full) frames, $taps taps)"
+grep -v "module \(core\|gw2\)" "$RUN/engine.log" | tail -8
+ERRS=$(journalctl -k --since "$SINCE" --no-pager | grep -c 'appletbdrm.*ERROR')
+if [ "$ENG_RC" != 0 ] && [ "$ERRS" = 0 ]; then
+    echo "== NO RESULT: the engine exited with $ENG_RC before testing anything"
+    systemctl start gw2-touchbar
+elif [ "$ERRS" -gt 0 ]; then
+    echo "== FAIL: $ERRS appletbdrm errors, first ones:"
+    journalctl -k --since "$SINCE" --no-pager | grep 'appletbdrm.*ERROR' | head -3
+    echo "== unfreezing the bar"
+    "$LIB/tbfix"
+else
+    echo "== PASS: no appletbdrm errors, tiny-dfr $(systemctl is-active tiny-dfr)"
+    systemctl start gw2-touchbar
+fi

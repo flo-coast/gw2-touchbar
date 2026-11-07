@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""gw2-touchbar-settings: put the GW2 Touch Bar together. Pages of panels, each with its own width, colour,
+font size and style, a live preview of the real 2008x60 bar, and the general settings. Every change is
+saved to ~/.config/gw2-touchbar/config.toml right away and the running bar picks it up within 2 s.
+Text fields apply on Enter or when you leave them.
+
+The app is also the bar's on/off switch. Nothing starts the bar at boot or when GW2 starts: switch it on here
+and it takes the Touch Bar whenever GW2 runs, close the app and tiny-dfr's F-keys are back."""
+import copy
+import os
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ENGINE = os.environ.get("GW2TB_ENGINE") or next(
+    (p for p in (os.path.join(HERE, "engine"), os.path.expanduser("~/src/macarchy-touchbar"))
+     if os.path.isdir(os.path.join(p, "macarchy_touchbar"))), os.path.join(HERE, "engine"))
+sys.path[:0] = [HERE, ENGINE]
+
+import gi                                                   # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, Gtk               # noqa: E402
+
+from gw2tb import barbuild, config, online, state           # noqa: E402
+from gw2tb.mumble import gw2_pids                           # noqa: E402
+
+GROUPS = ("Game", "Performance", "Account", "Everyday", "Bar")
+GRAPH_SECONDS = (30, 60, 120, 300)
+AUTOSTART = os.path.expanduser("~/.config/autostart/gw2-touchbar-settings.desktop")
+BAR, FEED = "gw2-touchbar.service", "gw2-touchbar-feed.service"
+SELFTEST = bool(os.environ.get("GW2TB_SHOT"))    # self-test photos must never touch the real services
+
+
+def systemctl(*args, user=False):
+    """Run systemctl, return (ok, message). The bar's start/stop needs no password (polkit rule)."""
+    cmd = ["systemctl", *(["--user"] if user else []), *args]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stderr or r.stdout).strip()
+
+
+def bar_active():
+    return systemctl("is-active", "--quiet", BAR)[0]
+
+
+SAMPLE_HIST = [round(55 + 12 * ((i * 37) % 11) / 11 - 6 * ((i * 13) % 7) / 7, 1) for i in range(300)]
+
+
+def sample_state():
+    """What the preview draws when GW2 isn't running: a believable WvW moment."""
+    now = time.time()
+    v = {"fps": 58, "ping": 42, "cpu": 2900, "ctemp": 71, "pkg": 24, "thread": 64, "gpu": 31, "sclk": 1380,
+         "busy": 88, "gtemp": 78, "vram": 3.4, "fan": 3800, "mem": 9.2, "net": 140}
+    return {
+        "t": now,
+        "game": {"map_name": "Eternal Battlegrounds", "map_id": 38, "profession": "Ranger", "spec": "Soulbeast",
+                 "heading": 257, "mount": "warclaw", "in_combat": True, "commander": False},
+        "v": v,
+        "sub": {"fps": "avg 61 · 1% low 38", "ping": "avg 45 ms", "cpu": "fastest 3400", "ctemp": "package 70 °C",
+                "thread": "Gw2-64.exe · 2nd 31 %", "busy": "peak 97 %", "gtemp": "edge 66 °C", "sclk": "mem 875 MHz",
+                "gpu": "cap 50 W", "vram": "of 8 GiB", "fan": "3800 / 3600 rpm", "mem": "of 31 GiB",
+                "net": "up 20 KiB/s", "pkg": "RAPL package"},
+        "hist": {k: [round(x * val / 55, 1) for x in SAMPLE_HIST] for k, val in v.items()},
+        "bottleneck": ["GPU-bound", "GPU 96 % busy"],
+        "combat": {"since": now - 47, "total": 812},
+        "timer": {"start": None, "runs": [431.5, 455.0, 470.2]},
+        "play": {"today": 7340, "session": 3120},
+        "squad": {"rtapi": True, "group_type": 2, "group_count": 23,
+                  "members": [{"self": True, "sub": 3, "prof": 4, "here": True},
+                              {"commander": True, "name": "Commander", "prof": 1, "here": True}]
+                  + [{"prof": p, "here": True} for p in (1, 1, 2, 3, 6, 6, 7, 8, 8, 8, 9, 5, 2, 1, 7, 6, 3, 8, 9, 4, 1)]},
+        "wvw": {"mine": "green", "vp": {"red": 231, "green": 268, "blue": 204}, "sk": {"red": 412, "green": 538,
+                "blue": 377}, "n": 34, "of": 84, "ends": now + 3300, "ppt": {"red": 145, "green": 230, "blue": 98}},
+        "tp": {"items": [{"name": "Glob of Ectoplasm", "sell": 1610, "prev": 1580, "target": 0},
+                         {"name": "Mystic Coin", "sell": 15230, "prev": 15400, "target": 15300}],
+               "delivery": {"coins": 48210, "items": []}},
+        "earnings": {"gold": 87455, "since": now - 5400, "others": [{"name": "Karma", "value": 21340},
+                                                                    {"name": "WvW Skirmish Claim Ticket", "value": 85}]},
+        "vault": {"daily": {"done": 3, "of": 4, "claimed": False, "open": ["Kill 50 enemies"]},
+                  "weekly": {"done": 7, "of": 12, "claimed": False, "open": []}},
+        "gems": {"per_gem": 3984, "for_100g": 251, "yesterday": 3950},
+        "music": {"status": "Playing", "title": "Fear Not This Night", "artist": "Asja Kadric", "app": "spotify",
+                  "length": 240, "pos": 95},
+        "notes": [{"app": "Discord", "summary": "Guild chat", "body": "raid in 10 at Lion's Arch", "t": now - 30}],
+        "battery": [{"kind": "mouse", "name": "G502", "pct": 34, "charging": False, "full": False},
+                    {"kind": "headset", "name": "Arctis", "pct": 71, "charging": False, "full": False}],
+        "weather": {"place": "Your town", "temp": 12, "sky": "partly cloudy", "min": 7, "max": 14, "wind": 9,
+                    "rain": ["17:00", 60]},
+        "scores": {"fav": "LAL", "games": [{"teams": [["LAL", "98", None], ["BOS", "95", None]], "state": "in",
+                                            "detail": "Q4 2:31", "start": None},
+                                           {"teams": [["GSW", "", None], ["DEN", "", None]], "state": "pre",
+                                            "detail": "", "start": "2026-10-31T02:00Z"}]},
+    }
+
+
+def live_state():
+    """The feed's state when GW2 runs (fresh state.json), else None."""
+    src = state.Source()
+    saved, state.override = state.override, None
+    try:
+        s = src.get()
+    finally:
+        state.override = saved
+    return s or None
+
+
+def hex_of(rgba):
+    return "#{:02x}{:02x}{:02x}".format(*(round(c * 255) for c in (rgba.red, rgba.green, rgba.blue)))
+
+
+def label(text, css=None, xalign=0.0):
+    lb = Gtk.Label(label=text, xalign=xalign)
+    if css:
+        lb.add_css_class(css)
+    return lb
+
+
+class Settings(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="GW2 Touch Bar")
+        self.set_default_size(1500, 820)
+        self.cfg = config.load()
+        self.page, self.sel = 0, None          # selected page, selected panel index
+        self.busy = False                      # True while widgets are filled from cfg (no save loops)
+        self.save_id = None
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(root, f"set_margin_{m}")(14)
+        self.set_child(root)
+
+        # the on/off switch: the bar runs only while it's on and this app is open
+        power = Gtk.Box(spacing=12)
+        power.append(label("Touch Bar for GW2", "heading"))
+        self.power = Gtk.Switch(valign=Gtk.Align.CENTER, sensitive=not SELFTEST)
+        self.power.connect("notify::active", self.on_power)
+        power.append(self.power)
+        self.power_label = label("", "dim-label")
+        power.append(self.power_label)
+        root.append(power)
+        self.power_busy = False                # True while tick() mirrors the service state into the switch
+        self.power_error = ""
+        self.connect("close-request", self.on_close)
+
+        # preview: the real renderer, scaled to the window; click a panel to select it
+        self.preview = Gtk.Picture(can_shrink=True, content_fit=Gtk.ContentFit.CONTAIN)
+        self.preview.set_size_request(-1, 70)
+        click = Gtk.GestureClick()
+        click.connect("pressed", self.on_preview_click)
+        self.preview.add_controller(click)
+        frame = Gtk.Frame(child=self.preview)
+        root.append(frame)
+        info = Gtk.Box(spacing=12)
+        self.source_label = label("", "dim-label")
+        self.width_label = label("", xalign=1.0)
+        self.width_label.set_hexpand(True)
+        info.append(self.source_label)
+        info.append(self.width_label)
+        root.append(info)
+
+        stack = Gtk.Stack()
+        switcher = Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.CENTER)
+        root.append(switcher)
+        root.append(stack)
+        stack.add_titled(self.build_layout_tab(), "layout", "Pages and panels")
+        stack.add_titled(self.build_settings_tab(), "settings", "Settings")
+        stack.add_titled(self.build_online_tab(), "online", "Account and online")
+        stack.add_titled(self.build_keys_tab(), "keys", "Keys group")
+        stack.set_vexpand(True)
+        if os.environ.get("GW2TB_TAB"):            # self-test: open on this tab
+            stack.set_visible_child_name(os.environ["GW2TB_TAB"])
+
+        self.fill_pages()
+        self.render()
+        if not SELFTEST and self.cfg["settings"]["start_on_open"] and not bar_active():
+            self.power.set_active(True)        # on_power starts it
+        self.update_power()
+        GLib.timeout_add_seconds(1, self.tick)
+
+    # ------------------------------------------------------------------ layout tab
+    def build_layout_tab(self):
+        box = Gtk.Box(spacing=18)
+
+        # pages
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        col.append(label("Pages", "heading"))
+        col.append(label("Swipe left or right on the bar to switch.", "dim-label"))
+        self.page_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.page_list.connect("row-selected", self.on_page_selected)
+        col.append(Gtk.ScrolledWindow(child=self.page_list, vexpand=True, min_content_width=220))
+        self.page_name = Gtk.Entry(placeholder_text="page name")
+        self.page_name.connect("activate", self.on_page_name)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("leave", lambda *_: self.on_page_name(self.page_name))
+        self.page_name.add_controller(focus)
+        col.append(self.page_name)
+        col.append(self.buttons([("Add", self.add_page), ("Up", lambda *_: self.move_page(-1)),
+                                 ("Down", lambda *_: self.move_page(1)), ("Delete", self.delete_page)]))
+        box.append(col)
+
+        # panels of the page
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True)
+        col.append(label("Panels on this page", "heading"))
+        col.append(label("Left to right as on the bar. Width 0 shares the room that's left.", "dim-label"))
+        self.panel_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.panel_list.connect("row-selected", self.on_panel_selected)
+        col.append(Gtk.ScrolledWindow(child=self.panel_list, vexpand=True))
+        add = Gtk.Box(spacing=6)
+        self.catalog = [t for g in GROUPS for t, c in config.CATALOG.items() if c["group"] == g]
+        self.add_choice = Gtk.DropDown.new_from_strings(
+            [f"{config.CATALOG[t]['group']}: {config.CATALOG[t]['title']}" for t in self.catalog])
+        self.add_choice.set_hexpand(True)
+        add.append(self.add_choice)
+        b = Gtk.Button(label="Add panel")
+        b.connect("clicked", self.add_panel)
+        add.append(b)
+        col.append(add)
+        col.append(self.buttons([("Move left", lambda *_: self.move_panel(-1)),
+                                 ("Move right", lambda *_: self.move_panel(1)),
+                                 ("Duplicate", self.dup_panel), ("Remove", self.remove_panel)]))
+        box.append(col)
+
+        # properties of the selected panel
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        self.props_title = label("Select a panel", "heading")
+        grid.attach(self.props_title, 0, 0, 2, 1)
+        self.p_width = Gtk.SpinButton.new_with_range(0, config.BAR_WIDTH, 10)
+        self.p_width.connect("value-changed", lambda w: self.set_prop("width", int(w.get_value())))
+        self.p_size = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, config.FONT_SIZES[1], 1)
+        self.p_size.set_hexpand(True)
+        self.p_size.add_mark(0, Gtk.PositionType.BOTTOM, "auto")
+        self.p_size.connect("value-changed", self.on_size)
+        self.p_style = Gtk.DropDown.new_from_strings(["number", "graph", "number + graph"])
+        self.p_style.connect("notify::selected", lambda w, _p: self.set_prop("style", config.STYLES[w.get_selected()]))
+        self.p_sub = Gtk.Switch(halign=Gtk.Align.START)
+        self.p_sub.connect("notify::active", lambda w, _p: self.set_prop("sub", w.get_active()))
+        self.p_color_on = Gtk.Switch(halign=Gtk.Align.START)
+        self.p_color_on.connect("notify::active", self.on_color)
+        self.p_color = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog(with_alpha=False))
+        self.p_color.connect("notify::rgba", self.on_color)
+        crow = Gtk.Box(spacing=8)
+        crow.append(self.p_color_on)
+        crow.append(self.p_color)
+        rows = [("Width (px)", self.p_width), ("Font size", self.p_size), ("Style", self.p_style),
+                ("Second line", self.p_sub), ("Own colour", crow)]
+        for i, (name, w) in enumerate(rows, 1):
+            grid.attach(label(name), 0, i, 1, 1)
+            grid.attach(w, 1, i, 1, 1)
+        self.props_hint = label("", "dim-label")
+        self.props_hint.set_wrap(True)
+        self.props_hint.set_max_width_chars(36)
+        grid.attach(self.props_hint, 0, len(rows) + 1, 2, 1)
+        self.props = grid
+        grid.set_size_request(380, -1)
+        box.append(grid)
+        return box
+
+    def buttons(self, spec):
+        row = Gtk.Box(spacing=6)
+        for text, cb in spec:
+            b = Gtk.Button(label=text)
+            b.connect("clicked", cb)
+            row.append(b)
+        return row
+
+    # ------------------------------------------------------------------ settings tab
+    def build_settings_tab(self):
+        s = self.cfg["settings"]
+        grid = Gtk.Grid(column_spacing=14, row_spacing=12, halign=Gtk.Align.START)
+        self.s_bright = Gtk.DropDown.new_from_strings(["dim", "bright"])
+        self.s_bright.set_selected(1 if s["brightness"] >= 2 else 0)
+        self.s_bright.connect("notify::selected", lambda w, _p: self.set_setting("brightness", w.get_selected() + 1))
+        self.s_swipe = Gtk.Switch(active=s["swipe"], halign=Gtk.Align.START)
+        self.s_swipe.connect("notify::active", lambda w, _p: self.set_setting("swipe", w.get_active()))
+        self.s_dots = Gtk.Switch(active=s["page_dots"], halign=Gtk.Align.START)
+        self.s_dots.connect("notify::active", lambda w, _p: self.set_setting("page_dots", w.get_active()))
+        self.s_graph = Gtk.DropDown.new_from_strings([f"{x} s" if x < 120 else f"{x // 60} min" for x in GRAPH_SECONDS])
+        self.s_graph.set_selected(GRAPH_SECONDS.index(s["graph_seconds"]) if s["graph_seconds"] in GRAPH_SECONDS else 1)
+        self.s_graph.connect("notify::selected",
+                             lambda w, _p: self.set_setting("graph_seconds", GRAPH_SECONDS[w.get_selected()]))
+        self.s_flip = Gtk.Switch(active=s["touch_flip"], halign=Gtk.Align.START)
+        self.s_flip.connect("notify::active", lambda w, _p: self.set_setting("touch_flip", w.get_active()))
+        self.s_mango = Gtk.Entry(text=s["mangohud_dir"], placeholder_text="found by itself", width_chars=40)
+        self.s_mango.connect("activate", lambda w: self.set_setting("mangohud_dir", w.get_text().strip()))
+        self.s_onopen = Gtk.Switch(active=s["start_on_open"], halign=Gtk.Align.START)
+        self.s_onopen.connect("notify::active", lambda w, _p: self.set_setting("start_on_open", w.get_active()))
+        self.s_login = Gtk.Switch(active=os.path.exists(AUTOSTART), halign=Gtk.Align.START, sensitive=not SELFTEST)
+        self.s_login.connect("notify::active", lambda w, _p: self.set_login(w.get_active()))
+        rows = [("Switch on when the app opens", self.s_onopen, "otherwise you switch it on at the top yourself"),
+                ("Open the app at login", self.s_login, "with both on, the bar is ready after every login"),
+                ("Brightness", self.s_bright, "applies the next time GW2 starts"),
+                ("Swipe between pages", self.s_swipe, ""),
+                ("Page dots", self.s_dots, "only shown with more than one page"),
+                ("Graphs show the last", self.s_graph, ""),
+                ("Mirror touch", self.s_flip, "only if taps land on the wrong side; next GW2 start"),
+                ("MangoHud log folder", self.s_mango, "for FPS, Enter to apply; empty finds it by itself")]
+        for i, (name, w, hint) in enumerate(rows):
+            grid.attach(label(name), 0, i, 1, 1)
+            grid.attach(w, 1, i, 1, 1)
+            grid.attach(label(hint, "dim-label"), 2, i, 1, 1)
+        return grid
+
+    # ------------------------------------------------------------------ online tab
+    def build_online_tab(self):
+        s = self.cfg["settings"]
+        grid = Gtk.Grid(column_spacing=14, row_spacing=12, halign=Gtk.Align.START)
+
+        def entry(key, width=40, secret=False, placeholder=""):
+            e = Gtk.PasswordEntry(show_peek_icon=True) if secret else Gtk.Entry(width_chars=width)
+            e.set_text(s[key])
+            if placeholder and not secret:
+                e.set_placeholder_text(placeholder)
+            e.connect("activate", lambda w: self.set_setting(key, w.get_text().strip()))
+            return e
+        self.o_key = entry("api_key", secret=True)
+        self.o_key.set_hexpand(True)
+        self.o_tp = Gtk.Entry(width_chars=60, placeholder_text="[&AgH0TQAA] or 19721, a target price after @ like 19721@1g20s")
+        self.o_tp.set_text(", ".join(f"{w['id']}" + (f"@{online.parse_coins_text(w['target'])}" if w["target"] else "")
+                                     for w in s["tp_watch"]))
+        self.o_tp.connect("activate", self.on_tp)
+        self.o_city = entry("weather_city", 24, placeholder="your town")
+        self.o_league = entry("sports_league", 24, placeholder="basketball/nba")
+        self.o_team = entry("sports_team", 8, placeholder="LAL")
+        self.o_filter = entry("notify_filter", 24, placeholder="discord")
+        self.o_popup = Gtk.Switch(active=s["notify_popup"], halign=Gtk.Align.START)
+        self.o_popup.connect("notify::active", lambda w, _p: self.set_setting("notify_popup", w.get_active()))
+        self.o_status = label("", "dim-label")
+        rows = [("GW2 API key", self.o_key, "account.arena.net/applications with account, wallet, progression and "
+                                            "tradingpost. Enter to apply. Stays on this computer."),
+                ("Trading Post watchlist", self.o_tp, "chat links or item ids, comma separated, Enter to apply"),
+                ("Weather town", self.o_city, "Enter to apply"),
+                ("Scores league", self.o_league, "ESPN path, e.g. basketball/nba, hockey/nhl, soccer/ger.1"),
+                ("Your team", self.o_team, "its short name, highlighted and shown first"),
+                ("Notifications", self.o_filter, "only these slide over the bar (a regular expression)"),
+                ("Slide over the bar", self.o_popup, "for 6 s, never in combat")]
+        for i, (name, w, hint) in enumerate(rows):
+            grid.attach(label(name), 0, i, 1, 1)
+            grid.attach(w, 1, i, 1, 1)
+            h = label(hint, "dim-label")
+            h.set_wrap(True)
+            h.set_max_width_chars(50)
+            grid.attach(h, 2, i, 1, 1)
+        grid.attach(self.o_status, 1, len(rows), 2, 1)
+        return grid
+
+    def on_tp(self, entry):
+        watch, bad = [], []
+        for part in (p.strip() for p in entry.get_text().split(",") if p.strip()):
+            item, _, target = part.partition("@")
+            iid, copper = online.chat_link_item(item), online.parse_coins(target) if target else 0
+            if iid is None or copper is None:
+                bad.append(part)
+            else:
+                watch.append({"id": iid, "target": copper})
+        self.o_status.set_text(f"not understood: {', '.join(bad)}" if bad else f"{len(watch)} items on the watchlist")
+        if not bad:
+            self.set_setting("tp_watch", watch)
+
+    # ------------------------------------------------------------------ keys tab
+    def build_keys_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.append(label("The buttons the Keys panel opens. Keys are evdev names without KEY_, "
+                         "for example M, F1, LeftShift. Several keys are pressed together. Enter to apply.",
+                         "dim-label"))
+        self.keys_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(Gtk.ScrolledWindow(child=self.keys_box, vexpand=True))
+        box.append(self.buttons([("Add key", self.add_key)]))
+        self.fill_keys()
+        return box
+
+    def fill_keys(self):
+        while (c := self.keys_box.get_first_child()):
+            self.keys_box.remove(c)
+        for i, k in enumerate(self.cfg["keys"]):
+            row = Gtk.Box(spacing=8)
+            name = Gtk.Entry(text=k["label"], width_chars=12)
+            keys = Gtk.Entry(text=" + ".join(k["keys"]), width_chars=30)
+            for e in (name, keys):
+                e.connect("activate", lambda _e, i=i, n=name, ks=keys: self.set_key(i, n, ks))
+            rm = Gtk.Button(label="Remove")
+            rm.connect("clicked", lambda _b, i=i: self.remove_key(i))
+            for w in (label("Label"), name, label("Keys"), keys, rm):
+                row.append(w)
+            self.keys_box.append(row)
+
+    def set_key(self, i, name, keys):
+        ks = [x.strip() for x in keys.get_text().replace(",", "+").split("+") if x.strip()]
+        if ks:
+            self.cfg["keys"][i] = {"label": name.get_text().strip() or "?", "keys": ks}
+            self.changed()
+
+    def add_key(self, *_):
+        self.cfg["keys"].append({"label": "New", "keys": ["F1"]})
+        self.fill_keys()
+        self.changed()
+
+    def remove_key(self, i):
+        del self.cfg["keys"][i]
+        self.fill_keys()
+        self.changed()
+
+    # ------------------------------------------------------------------ pages
+    def fill_pages(self):
+        self.busy = True
+        while (c := self.page_list.get_first_child()):
+            self.page_list.remove(c)
+        for pg in self.cfg["pages"]:
+            self.page_list.append(label(f"{pg['name']}  ·  {len(pg['panels'])} panels"))
+        self.page_list.select_row(self.page_list.get_row_at_index(self.page))
+        self.page_name.set_text(self.cfg["pages"][self.page]["name"])
+        self.busy = False
+        self.fill_panels()
+
+    def on_page_selected(self, _lb, row):
+        if self.busy or row is None:
+            return
+        self.page, self.sel = row.get_index(), None
+        self.page_name.set_text(self.cfg["pages"][self.page]["name"])
+        self.fill_panels()
+        self.render()
+
+    def on_page_name(self, entry):
+        name = entry.get_text().strip()
+        if name and name != self.cfg["pages"][self.page]["name"]:
+            self.cfg["pages"][self.page]["name"] = name
+            self.fill_pages()
+            self.changed()
+
+    def add_page(self, *_):
+        self.cfg["pages"].insert(self.page + 1, {"name": f"Page {len(self.cfg['pages']) + 1}",
+                                                 "panels": [config.panel({"type": "clock"})]})
+        self.page, self.sel = self.page + 1, None
+        self.fill_pages()
+        self.changed()
+
+    def move_page(self, d):
+        j = self.page + d
+        if 0 <= j < len(self.cfg["pages"]):
+            p = self.cfg["pages"]
+            p[self.page], p[j] = p[j], p[self.page]
+            self.page = j
+            self.fill_pages()
+            self.changed()
+
+    def delete_page(self, *_):
+        if len(self.cfg["pages"]) > 1:
+            del self.cfg["pages"][self.page]
+            self.page, self.sel = max(0, self.page - 1), None
+            self.fill_pages()
+            self.changed()
+
+    # ------------------------------------------------------------------ panels
+    @property
+    def panels(self):
+        return self.cfg["pages"][self.page]["panels"]
+
+    def fill_panels(self):
+        self.busy = True
+        while (c := self.panel_list.get_first_child()):
+            self.panel_list.remove(c)
+        for p in self.panels:
+            c = config.CATALOG[p["type"]]
+            w = f"{p['width']} px" if p["width"] else "fills"
+            extra = [w] + ([p["style"]] if c.get("num") else []) + (["own colour"] if p["color"] else [])
+            self.panel_list.append(label(f"{c['title']}  ·  {' · '.join(extra)}"))
+        if self.sel is not None and self.sel < len(self.panels):
+            self.panel_list.select_row(self.panel_list.get_row_at_index(self.sel))
+        else:
+            self.sel = None
+        used = sum(p["width"] for p in self.panels) + 6 * max(0, len(self.panels) - 1) + 16
+        fills = sum(1 for p in self.panels if not p["width"])
+        over = used > config.BAR_WIDTH
+        self.width_label.set_markup(
+            f"{'<span foreground=\"#e05040\">' if over else ''}{used} of {config.BAR_WIDTH} px used"
+            f"{' (too wide, the last panels are cut off)</span>' if over else ''}"
+            + (f" · {fills} panel{'s' if fills > 1 else ''} share the rest" if fills and not over else ""))
+        self.busy = False
+        self.fill_props()
+
+    def on_panel_selected(self, _lb, row):
+        if self.busy:
+            return
+        self.sel = row.get_index() if row else None
+        self.fill_props()
+
+    def fill_props(self):
+        self.busy = True
+        p = self.panels[self.sel] if self.sel is not None else None
+        self.props.set_sensitive(p is not None)
+        if p:
+            c = config.CATALOG[p["type"]]
+            self.props_title.set_text(c["title"])
+            self.p_width.set_value(p["width"])
+            self.p_size.set_value(p["size"])
+            self.p_style.set_selected(config.STYLES.index(p["style"]))
+            self.p_style.set_sensitive(bool(c.get("num")))
+            self.p_sub.set_active(p["sub"])
+            self.p_color_on.set_active(bool(p["color"]))
+            rgba = Gdk.RGBA()
+            rgba.parse(p["color"] or "#333333")
+            self.p_color.set_rgba(rgba)
+            self.props_hint.set_text(
+                "The colour is the panel's background (and its graph line). Panels that change colour by "
+                "themselves, like combat or a boss that's up, keep their own." if not c.get("num") else
+                "Graphs keep the last 30 s to 5 min, see Settings.")
+        else:
+            self.props_title.set_text("Select a panel (or click it in the preview)")
+        self.busy = False
+
+    def set_prop(self, key, value):
+        if self.busy or self.sel is None:
+            return
+        self.panels[self.sel][key] = value
+        self.fill_panels()
+        self.changed()
+
+    def on_size(self, scale):
+        v = int(scale.get_value())
+        if 0 < v < config.FONT_SIZES[0]:          # the gap between auto and the smallest size
+            v = config.FONT_SIZES[0]
+        self.set_prop("size", v)
+
+    def on_color(self, *_):
+        if self.busy:
+            return
+        self.set_prop("color", hex_of(self.p_color.get_rgba()) if self.p_color_on.get_active() else "")
+
+    def add_panel(self, *_):
+        t = self.catalog[self.add_choice.get_selected()]
+        at = (self.sel + 1) if self.sel is not None else len(self.panels)
+        self.panels.insert(at, config.panel({"type": t}))
+        self.sel = at
+        self.fill_pages()
+        self.changed()
+
+    def move_panel(self, d):
+        if self.sel is None:
+            return
+        j = self.sel + d
+        if 0 <= j < len(self.panels):
+            self.panels[self.sel], self.panels[j] = self.panels[j], self.panels[self.sel]
+            self.sel = j
+            self.fill_panels()
+            self.changed()
+
+    def dup_panel(self, *_):
+        if self.sel is not None:
+            self.panels.insert(self.sel + 1, copy.deepcopy(self.panels[self.sel]))
+            self.sel += 1
+            self.fill_pages()
+            self.changed()
+
+    def remove_panel(self, *_):
+        if self.sel is not None:
+            del self.panels[self.sel]
+            self.sel = None
+            self.fill_pages()
+            self.changed()
+
+    def on_preview_click(self, _g, _n, x, _y):
+        pw = self.preview.get_width()
+        if not pw or not self.rects:
+            return
+        scale = min(pw / config.BAR_WIDTH, self.preview.get_height() / 60)
+        off = (pw - config.BAR_WIDTH * scale) / 2
+        bx = (x - off) / scale
+        for i, (x0, x1) in enumerate(self.rects):
+            if x0 <= bx <= x1:
+                self.sel = i
+                self.fill_panels()
+                return
+
+    # ------------------------------------------------------------------ on/off
+    def on_power(self, sw, _p):
+        if self.power_busy or SELFTEST:
+            return
+        if sw.get_active():
+            ok, msg = systemctl("start", FEED, user=True)
+            ok2, msg2 = systemctl("start", "--no-block", BAR) if ok else (False, "")
+            if not (ok and ok2):
+                self.power_error = f"could not switch on: {msg or msg2}"
+                systemctl("stop", "--no-block", FEED, user=True)
+                self.power_busy = True
+                sw.set_active(False)
+                self.power_busy = False
+            else:
+                self.power_error = ""
+        else:
+            self.power_off()
+        self.update_power()
+
+    def power_off(self):
+        """Bar first (it hands the Touch Bar back to tiny-dfr), then the feed."""
+        if SELFTEST:
+            return
+        systemctl("stop", "--no-block", BAR)
+        systemctl("stop", "--no-block", FEED, user=True)
+
+    def on_close(self, *_):
+        self.power_off()
+        return False                           # let the window close
+
+    def update_power(self):
+        on = bar_active()
+        if on != self.power.get_active():
+            self.power_busy = True
+            self.power.set_active(on)
+            self.power_busy = False
+        if SELFTEST:
+            text = "self-test, the switch does nothing"
+        elif self.power_error and not on:
+            text = self.power_error
+        elif not on:
+            text = "off, the Touch Bar shows the F-keys"
+        elif gw2_pids():
+            text = "on, GW2 has the Touch Bar. Closing this app switches it off"
+        else:
+            text = "on, waits for GW2. Closing this app switches it off"
+        self.power_label.set_text(text)
+
+    def set_login(self, on):
+        if self.busy or SELFTEST:
+            return
+        if on:
+            os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+            with open(AUTOSTART, "w") as f:
+                f.write("[Desktop Entry]\nType=Application\nName=GW2 Touch Bar\n"
+                        f"Exec={os.path.realpath(sys.argv[0])}\nIcon=input-touchpad\n"
+                        "Comment=Settings and on/off switch for the GW2 Touch Bar\n")
+        else:
+            try:
+                os.unlink(AUTOSTART)
+            except FileNotFoundError:
+                pass
+
+    # ------------------------------------------------------------------ settings
+    def set_setting(self, key, value):
+        if self.busy:
+            return
+        self.cfg["settings"][key] = value
+        self.changed()
+
+    def changed(self):
+        self.render()
+        if self.save_id:
+            GLib.source_remove(self.save_id)
+        self.save_id = GLib.timeout_add(400, self.save)
+
+    def save(self):
+        self.save_id = None
+        config.save(self.cfg)
+        self.cfg = config.load()
+        return False
+
+    # ------------------------------------------------------------------ preview
+    def render(self):
+        live = live_state()
+        self.source_label.set_text("preview with live data from GW2" if live else
+                                   "preview with sample data (GW2 isn't running)")
+        cfg = config.normalize(self.cfg)
+        img = barbuild.render(cfg, self.page, live or sample_state())
+        self.rects = self.panel_rects(cfg)
+        img.flush()
+        data = GLib.Bytes.new(bytes(img.get_data()))
+        tex = Gdk.MemoryTexture.new(img.get_width(), img.get_height(), Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+                                    data, img.get_stride())
+        self.preview.set_paintable(tex)
+
+    def panel_rects(self, cfg):
+        """x ranges of the page's panels, the way the engine lays them out (for clicks on the preview)."""
+        from macarchy_touchbar.layout import distribute
+        panels = cfg["pages"][self.page]["panels"]
+        rects = distribute([p["width"] for p in panels], [0 if p["width"] else 1 for p in panels],
+                           config.BAR_WIDTH - (14 * len(cfg["pages"]) + 10 + 6
+                                               if cfg["settings"]["page_dots"] and len(cfg["pages"]) > 1 else 0))
+        return [(r.x, r.x + r.w) for r in rects]
+
+    def tick(self):
+        if live_state():
+            self.render()
+        self.update_power()
+        return True
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        # one window normally, but self-test runs must not hand over to an instance that is still closing
+        flags = Gio.ApplicationFlags.NON_UNIQUE if os.environ.get("GW2TB_SHOT") else Gio.ApplicationFlags.DEFAULT_FLAGS
+        super().__init__(application_id="de.flo.Gw2TouchbarSettings", flags=flags)
+
+    def do_activate(self):
+        win = self.get_active_window() or Settings(self)
+        win.present()
+        if os.environ.get("GW2TB_SHOT"):              # self-test: photograph the window, then quit
+            GLib.timeout_add(1500, self.shot, win, os.environ["GW2TB_SHOT"])
+
+    def shot(self, win, path, tries=30):
+        """Self-test photo. A busy machine may not have drawn the window yet: try again for a few seconds."""
+        node = None
+        if win.get_mapped() and win.get_width() > 0:
+            snap = Gtk.Snapshot()
+            Gtk.WidgetPaintable.new(win).snapshot(snap, win.get_width(), win.get_height())
+            node = snap.to_node()
+        if node:
+            win.get_native().get_renderer().render_texture(node, None).save_to_png(path)
+        elif tries:
+            GLib.timeout_add(300, self.shot, win, path, tries - 1)
+            return False
+        else:
+            print("shot: the window never got drawn", file=sys.stderr)
+        self.quit()
+        return False
+
+
+if __name__ == "__main__":
+    App().run(sys.argv[:1])

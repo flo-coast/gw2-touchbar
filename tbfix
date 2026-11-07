@@ -1,0 +1,10 @@
+#!/bin/bash
+# Frozen Touch Bar (appletbdrm -110): re-plug the display, back to Linux mode, tiny-dfr on. Root.
+systemctl stop gw2-touchbar          # its ExecStopPost starts tiny-dfr, so stop that after
+systemctl stop tiny-dfr
+echo 0 > /sys/bus/usb/devices/7-6/authorized; sleep 2
+echo 1 > /sys/bus/usb/devices/7-6/authorized; sleep 3
+D=/sys/bus/usb/devices/7-6/bConfigurationValue
+[ "$(cat $D)" = 2 ] || { echo 0 > $D; sleep 1; echo 2 > $D; sleep 3; }
+systemctl start --no-block tiny-dfr gw2-touchbar; sleep 4
+echo "config $(cat $D), tiny-dfr $(systemctl is-active tiny-dfr)"

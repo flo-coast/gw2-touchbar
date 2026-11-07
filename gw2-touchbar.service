@@ -1,0 +1,17 @@
+[Unit]
+Description=Touch Bar for Guild Wars 2 (takes the bar from tiny-dfr while GW2 runs)
+# No [Install]: nothing starts this at boot. gw2-touchbar-settings starts and stops it (polkit rule
+# 50-gw2-touchbar.rules), and it quits by itself once the app is closed.
+After=tiny-dfr.service
+
+[Service]
+ExecStart=/usr/local/lib/gw2-touchbar/gw2-touchbar
+ExecStopPost=-/usr/bin/systemctl start --no-block tiny-dfr.service
+Environment=GW2TB_USER=@USER@
+Environment=XDG_RUNTIME_DIR=/run/gw2-touchbar
+RuntimeDirectory=gw2-touchbar
+StateDirectory=gw2-touchbar
+Nice=5
+Restart=on-failure
+RestartSec=10
+

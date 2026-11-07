@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""gw2-touchbar: the MacBook Touch Bar shows Guild Wars 2 while the game runs, tiny-dfr's keys otherwise.
+
+Runs as root (gw2-touchbar.service), but only while the settings app is open: the app starts and stops
+the service, nothing starts it at boot, and it quits by itself once the app is gone. The Touch Bar's DRM card, its touch device, the backlight and
+tiny-dfr are root's. GW2's data comes from MumbleLink inside the Wine process (gw2tb/mumble.py). It waits for
+Gw2-64.exe (one look at /proc every 3 s), stops tiny-dfr, draws the bar with the macarchy-touchbar
+engine and our gw2 module, and when GW2 is gone it closes the bar and starts tiny-dfr again.
+
+  gw2-touchbar                 the service: wait for GW2, take over, give back, repeat until the app closes
+  gw2-touchbar --headless      engine only, no GW2 wait, no hardware (GW2TB_FAKE=<json> for data);
+                               screenshot/touch through `macarchy-touchbar screenshot|touch`
+  gw2-touchbar --hw-test N     the real bar for N seconds without GW2 (hwtest drives it; needs root,
+                               tiny-dfr stopped). GW2TB_PARTIAL=1 sends partial frames like before
+"""
+import os
+import pwd
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ENGINE = os.environ.get("GW2TB_ENGINE", os.path.join(HERE, "engine"))   # holds macarchy_touchbar/
+sys.path[:0] = [HERE, ENGINE]
+
+from macarchy_touchbar.ipc import EngineIpc, IpcServer, sock_path   # noqa: E402
+from macarchy_touchbar.log import log                      # noqa: E402
+from macarchy_touchbar.loop import EventLoop               # noqa: E402
+from macarchy_touchbar.output import DrmOutput, HeadlessOutput        # noqa: E402
+from macarchy_touchbar.touch import GestureRecognizer, TouchReader, find_touch_device   # noqa: E402
+from macarchy_touchbar.uinput import VirtualKeyboard       # noqa: E402
+
+from gw2tb import appwatch, barbuild, config               # noqa: E402
+from gw2tb.mumble import gw2_pids                          # noqa: E402
+
+BACKLIGHT = "/sys/class/backlight/appletb_backlight"
+GONE_AFTER = 10       # seconds without Gw2-64.exe before the bar goes back to tiny-dfr
+stopping = False
+
+
+def engine(headless=False, run_for=None, app=None):
+    """Draw the bar until GW2 is gone (or forever, headless; or run_for seconds). Returns when done.
+    The user's config (gw2tb/config.py) is reread whenever it changes; touch_flip needs a new start."""
+    loop = EventLoop()
+    if os.environ.get("GW2TB_PARTIAL"):
+        DrmOutput.full_frames = False
+    output = HeadlessOutput() if headless else DrmOutput.open()
+    cfg_path = config.path()
+    cfg = config.load(cfg_path)
+    keyboard = None if headless else VirtualKeyboard(name="gw2-touchbar keyboard")
+    bar, host, pages = barbuild.build(output, loop, cfg, keyboard=keyboard)
+    deliver = barbuild.gesture_filter(bar, pages)
+
+    if not headless:
+        path = find_touch_device()
+        if path:
+            reader = TouchReader.open(path, flip=bool(cfg["settings"]["touch_flip"]))
+            rec = GestureRecognizer()
+
+            def feed(gs):
+                for g in gs:
+                    deliver(g)
+            loop.add_fd(reader.fd, lambda: feed([g for ev in reader.read() for g in rec.feed(ev)]))
+            loop.every(0.05, lambda: feed(rec.tick(loop.now())))
+        else:
+            log("no Touch Bar touch device found")
+
+        seen = {"at": time.monotonic()}
+
+        def watch_game():
+            global stopping
+            if app and app.gone():
+                log("settings app closed")
+                stopping = True
+                loop.stop()
+            elif gw2_pids():
+                seen["at"] = time.monotonic()
+            elif time.monotonic() - seen["at"] > GONE_AFTER:
+                log("GW2 is gone")
+                loop.stop()
+        if run_for:
+            loop.after(run_for, loop.stop)
+        else:
+            loop.every(3.0, watch_game)
+
+    mtime = {"v": None}
+
+    def config_changed():
+        try:
+            m = os.path.getmtime(cfg_path)
+        except OSError:
+            m = None
+        if m != mtime["v"]:
+            if mtime["v"] is not None:
+                log("config changed, reloading")
+                pages.reload(config.load(cfg_path))
+            mtime["v"] = m
+    config_changed()
+    loop.every(2.0, config_changed)
+
+    def reload():
+        pages.reload(config.load(cfg_path))
+        return "reloaded"
+
+    def ipc_handle(line):
+        verb = line.strip().split(" ", 1)[0]
+        if verb in ("page", "next", "prev"):           # gw2-touchbarctl page N / next / prev
+            if verb == "page":
+                pages.show(int(line.split()[1]))
+            else:
+                pages.flip(1 if verb == "next" else -1)
+            return f"page {pages.page}"
+        return engine_ipc.handle(line)
+    engine_ipc = EngineIpc(bar, host, reload)
+    ipc = IpcServer(loop, sock_path(), ipc_handle)
+    loop.every(0.1, bar.tick)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: (globals().__setitem__("stopping", True), loop.stop()))
+    log("bar is ours")
+    try:
+        loop.run_forever()
+    finally:
+        for m in list(host.modules):
+            host.unload(m)
+        ipc.close()
+        if keyboard:
+            keyboard.close()
+        output.close()
+
+
+def tiny_dfr(action):
+    # a start must not wait: during our own stop it would queue behind it and deadlock
+    no_block = ["--no-block"] if action == "start" else []
+    subprocess.run(["systemctl", action, *no_block, "tiny-dfr.service"], check=False)
+
+
+def backlight(level):
+    try:
+        with open(f"{BACKLIGHT}/brightness", "w") as f:
+            f.write(str(level))
+    except OSError as e:
+        log(f"backlight: {e}")
+
+
+def serve():
+    global stopping
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    app = appwatch.Watch(pwd.getpwnam(os.environ.get("GW2TB_USER", "")).pw_uid)
+    log("waiting for GW2")
+    try:
+        while not stopping:
+            if app.gone():
+                log("settings app closed, stopping")
+                break
+            if not gw2_pids():
+                time.sleep(3)
+                continue
+            log("GW2 started, taking the Touch Bar from tiny-dfr")
+            tiny_dfr("stop")
+            time.sleep(0.5)
+            try:
+                backlight(int(config.load()["settings"]["brightness"]))
+                engine(app=app)
+            except Exception as e:                    # never leave the bar dark
+                log(f"engine failed: {e!r}")
+                time.sleep(10)
+            finally:
+                tiny_dfr("start")
+                log("bar handed back to tiny-dfr")
+            while not stopping and gw2_pids() and not app.gone():   # engine gave up early: no retry every 3 s
+                time.sleep(3)
+    finally:
+        tiny_dfr("start")
+
+
+if __name__ == "__main__":
+    if "--headless" in sys.argv:
+        engine(headless=True)
+    elif "--hw-test" in sys.argv:
+        engine(run_for=float(sys.argv[sys.argv.index("--hw-test") + 1]))
+    else:
+        if os.geteuid() != 0:
+            sys.exit("gw2-touchbar: needs root (MumbleLink, Touch Bar, tiny-dfr); the service runs it")
+        serve()

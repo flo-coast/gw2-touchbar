@@ -1,0 +1,52 @@
+# hwtest's own layout: one page, Keys at x 1548-1678 and combat at 454-674 (the taps in hwtest)
+# gw2-touchbar, written by gw2-touchbar-settings. The bar reloads it when it changes.
+
+[settings]
+brightness = 2
+touch_flip = false
+page_dots = true
+swipe = true
+graph_seconds = 60
+mangohud_dir = ""
+api_key = ""
+tp_watch = []
+weather_city = ""
+sports_league = "basketball/nba"
+sports_team = ""
+notify_filter = "discord"
+notify_popup = true
+
+[[keys]]
+label = "Map"
+keys = ["M"]
+
+[[keys]]
+label = "Hero"
+keys = ["H"]
+
+[[keys]]
+label = "Bags"
+keys = ["I"]
+
+[[keys]]
+label = "WvW"
+keys = ["B"]
+
+[[keys]]
+label = "TP"
+keys = ["O"]
+
+[[keys]]
+label = "Mark"
+keys = ["LeftMeta", "LeftShift", "M"]
+
+[[pages]]
+name = "Game"
+panels = [
+    { type = "char", width = 440, color = "", size = 0, style = "number", sub = true },
+    { type = "combat", width = 220, color = "", size = 0, style = "number", sub = true },
+    { type = "boss", width = 0, color = "", size = 0, style = "number", sub = true },
+    { type = "keys", width = 130, color = "", size = 0, style = "number", sub = true },
+    { type = "sensors", width = 210, color = "", size = 0, style = "number", sub = true },
+    { type = "clock", width = 100, color = "", size = 0, style = "number", sub = true },
+]

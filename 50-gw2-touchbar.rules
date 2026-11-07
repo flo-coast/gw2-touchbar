@@ -1,0 +1,10 @@
+// gw2-touchbar: lets the desktop user start and stop gw2-touchbar.service from the settings app without a
+// password. Only that one unit, only start and stop, only an active local session.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "gw2-touchbar.service" &&
+        (action.lookup("verb") == "start" || action.lookup("verb") == "stop") &&
+        subject.user == "@USER@" && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});
