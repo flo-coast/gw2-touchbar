@@ -24,6 +24,17 @@ CACHE = os.environ.get("GW2TB_WEBCACHE") or os.path.expanduser("~/.cache/gw2-tou
 TEAM_COLOR_IDS = {9: "blue", 55: "green", 376: "red"}       # MumbleLink identity team_color_id
 UPOWER_KINDS = {2: "laptop", 5: "mouse", 6: "keyboard", 12: "controller", 17: "headset", 18: "speakers",
                 19: "headphones", 21: "pen", 24: "touchpad"}
+BT_KINDS = {"input-mouse": "mouse", "input-keyboard": "keyboard", "audio-headset": "headset",
+            "audio-headphones": "headphones", "input-gaming": "controller", "audio-card": "speakers",
+            "input-tablet": "pen", "phone": "phone", "computer": "computer"}
+
+
+def mac_in(text):
+    """A Bluetooth address inside a UPower path or serial (dev_EC_66_... or ec:66:...) -> EC:66:..., or ""."""
+    m = re.search(r"(?:[0-9A-Fa-f]{2}[:_]){5}[0-9A-Fa-f]{2}", text or "")
+    return m.group(0).replace("_", ":").upper() if m else ""
+
+
 WMO = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "cloudy", 45: "fog", 48: "fog", 51: "drizzle",
        53: "drizzle", 55: "drizzle", 61: "rain", 63: "rain", 65: "heavy rain", 66: "freezing rain",
        67: "freezing rain", 71: "snow", 73: "snow", 75: "heavy snow", 77: "snow grains", 80: "showers",
@@ -385,9 +396,29 @@ class Online:
                                                        Gio.DBusCallFlags.NONE, 500, None, None)
 
     def batteries(self):
-        out = []
+        """Batteries of connected devices. Bluetooth from BlueZ (it knows mice that UPower misses), the rest
+        (USB receivers, the laptop) from UPower. Each: id, kind, name, pct, charging, full."""
+        out, by_mac = [], {}
         try:
             bus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+        except GLib.Error:
+            return [{"err": "no system bus"}]
+        try:
+            objs = bus.call_sync("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+                                 None, None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+            for ifs in objs.values():
+                d, b = ifs.get("org.bluez.Device1"), ifs.get("org.bluez.Battery1")
+                if not d or not b or not d.get("Connected"):
+                    continue
+                mac = str(d.get("Address", "")).upper()
+                kind = BT_KINDS.get(d.get("Icon", ""), "device")
+                dev = {"id": mac, "kind": kind, "name": d.get("Alias") or d.get("Name") or kind,
+                       "pct": float(b.get("Percentage", 0)), "charging": False, "full": False}
+                by_mac[mac] = dev
+                out.append(dev)
+        except GLib.Error:
+            pass
+        try:
             devs = bus.call_sync("org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower",
                                  "EnumerateDevices", None, None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
             for dev in devs:
@@ -396,9 +427,15 @@ class Online:
                                   Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
                 if p.get("Type") in (0, 1) or not p.get("IsPresent", True):          # unknown, power supply
                     continue
+                charging, full = p.get("State") == 1, p.get("State") == 4
+                mac = mac_in(f"{p.get('NativePath', '')} {p.get('Serial', '')}")
+                if mac in by_mac:                       # BlueZ has it already, UPower adds the charge state
+                    by_mac[mac].update(charging=charging, full=full)
+                    continue
                 kind = UPOWER_KINDS.get(p.get("Type"), "device")
-                out.append({"kind": kind, "name": p.get("Model") or kind, "pct": p.get("Percentage", 0),
-                            "charging": p.get("State") == 1, "full": p.get("State") == 4})
+                out.append({"id": mac or ("laptop" if kind == "laptop" else str(p.get("NativePath") or dev)),
+                            "kind": kind, "name": "Laptop" if kind == "laptop" else p.get("Model") or kind, "pct": float(p.get("Percentage", 0)),
+                            "charging": charging, "full": full})
         except GLib.Error:
             pass
         return sorted(out, key=lambda b: b["pct"]) or [{"err": "no devices with a battery"}]

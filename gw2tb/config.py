@@ -25,7 +25,7 @@ CATALOG = {
     "mem":        {"title": "Memory", "group": "Performance", "width": 170, "num": "mem", "unit": "GiB", "max": 32, "fmt": "{:.1f}"},
     "net":        {"title": "Network", "group": "Performance", "width": 190, "num": "net", "unit": "KiB/s", "max": 2000},
     "bottleneck": {"title": "Bottleneck", "group": "Performance", "width": 260},
-    "sensors":    {"title": "GPU temp + CPU clock", "group": "Performance", "width": 210},
+    "sensors":    {"title": "Sensors (your pick)", "group": "Performance", "width": 210},
     # game
     "char":       {"title": "Character + map", "group": "Game", "width": 440},
     "combat":     {"title": "Combat timer", "group": "Game", "width": 220},
@@ -43,7 +43,7 @@ CATALOG = {
     # everyday
     "music":      {"title": "Now playing", "group": "Everyday", "width": 420},
     "notify":     {"title": "Latest notification", "group": "Everyday", "width": 0},
-    "battery":    {"title": "Batteries", "group": "Everyday", "width": 260},
+    "battery":    {"title": "Batteries", "group": "Everyday", "width": 260},     # all devices or one
     "weather":    {"title": "Weather", "group": "Everyday", "width": 300},
     "scores":     {"title": "Scores", "group": "Everyday", "width": 0},
     # bar
@@ -52,6 +52,12 @@ CATALOG = {
     "spacer":     {"title": "Empty space", "group": "Bar", "width": 0},
 }
 STYLES = ("number", "graph", "both")            # number panels only
+NUMS = [t for t, c in CATALOG.items() if c.get("num")]          # what a sensors panel can show
+SHORT = {"fps": "FPS", "ping": "Ping", "cpu": "CPU", "ctemp": "CPU temp", "pkg": "CPU power", "thread": "Main thread",
+         "gpu": "GPU power", "sclk": "GPU clock", "busy": "GPU busy", "gtemp": "GPU", "vram": "VRAM", "fan": "Fans",
+         "mem": "RAM", "net": "Network"}
+SENSOR_ITEMS = ["gtemp", "cpu"]                 # what the sensors panel showed before you could pick
+MAX_ITEMS = 6
 FONT_SIZES = (14, 30)                           # px of a panel's main line
 BAR_WIDTH = 2008
 
@@ -129,6 +135,12 @@ def panel(p):
     if p.get("style") in STYLES:
         out["style"] = p["style"]
     out["sub"] = bool(p.get("sub", True))
+    if t == "sensors":
+        items = [i for i in _list(p.get("items", SENSOR_ITEMS)) if i in NUMS]
+        out["items"] = list(dict.fromkeys(items))[:MAX_ITEMS]
+    elif t == "battery":                        # "" = every device, else one device (id) and its last name
+        out["device"] = str(p.get("device", ""))[:64]
+        out["device_name"] = str(p.get("device_name", ""))[:64]
     return out
 
 

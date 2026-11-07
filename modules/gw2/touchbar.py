@@ -91,6 +91,36 @@ class Panel(Widget):
         else:
             painter.text(cr, main, Rect(x, r.y, w, r.h), size=round(self.size * 1.15), color=fg, align=align)
 
+    def columns(self, painter, cr, cols, fg):
+        """Values side by side, each with its name below: [(value, name, colour or None)]. As many as fit."""
+        r = self.rect
+        if not cols:
+            return
+        n = max(1, min(len(cols), int((r.w - 12) // 70)))
+        w = (r.w - 12) / n
+        name_fg = fg if getattr(self, "bg_color", None) else self.t.FG_DIM
+        for i, (val, name, col) in enumerate(cols[:n]):
+            x = r.x + 6 + i * w
+            if self.p["sub"]:
+                painter.text(cr, val, Rect(x, r.y + 3, w, 34), size=self.size, color=col or fg)
+                painter.text(cr, name, Rect(x, r.y + 35, w, 22), size=max(11, round(self.size * 0.55)), color=name_fg)
+            else:
+                painter.text(cr, val, Rect(x, r.y, w, r.h), size=round(self.size * 1.15), color=col or fg)
+
+
+def num_text(key, val):
+    """A sensor value, short enough for a column: 78°, 3.3 GHz, 58, 42 ms."""
+    if val is None:
+        return "-"
+    c = config.CATALOG[key]
+    if c["unit"] == "°C":
+        return f"{val:.0f}°"
+    if c["unit"] == "MHz" and val >= 1000:
+        return f"{val / 1000:.1f} GHz"
+    if c["unit"] == "KiB/s":
+        return f"{val / 1024:.1f} M/s" if val >= 1024 else f"{val:.0f} K/s"
+    return c.get("fmt", "{:.0f}").format(val) + (f" {c['unit']}" if c["unit"] else "")
+
 
 class Num(Panel):
     """A number with unit, its second line and/or a graph of the last graph_seconds."""
@@ -309,13 +339,18 @@ class Bottleneck(Panel):
 
 
 class Sensors(Panel):
+    """The sensor values you picked, side by side. Hot ones turn orange."""
+    HOT = {"gtemp": 90, "ctemp": 95, "thread": 95}
+
     def draw(self, cr, painter):
         v = self.s.get("v") or {}
-        hot = (v.get("gtemp") or 0) >= 90
         fg = self.bg(painter, cr)
-        gpu = f"GPU {v['gtemp']:.0f}°" if v.get("gtemp") is not None else "GPU -"
-        cpu = f"CPU {v['cpu'] / 1000:.1f} GHz" if v.get("cpu") is not None else "CPU -"
-        self.lines(painter, cr, gpu, cpu, self.t.ACCENT_ORANGE if hot else fg)
+        cols = []
+        for k in self.p.get("items") or config.SENSOR_ITEMS:
+            val = v.get(k)
+            hot = k in self.HOT and val is not None and val >= self.HOT[k]
+            cols.append((num_text(k, val), config.SHORT[k], self.t.ACCENT_ORANGE if hot and not self.color else None))
+        self.columns(painter, cr, cols, fg)
 
 
 class Spacer(Panel):
@@ -528,16 +563,33 @@ class Notify(Online):
 
 
 class Battery(Online):
+    """All devices side by side, or the one picked in the settings. Low ones turn red."""
     def draw(self, cr, painter):
         d = self.data(painter, cr)
         if not d:
             return
-        low = d[0]
-        warn = low["pct"] < 15 and not low["charging"]
-        fg = self.bg(painter, cr, self.t.ACCENT_RED if warn else None)
-        state_txt = " charging" if low["charging"] else " full" if low["full"] else ""
-        others = " · ".join(f"{b['kind']} {b['pct']:.0f} %" for b in d[1:3])
-        self.lines(painter, cr, f"{low['kind']} {low['pct']:.0f} %{state_txt}", others or low["name"], fg)
+        want = self.p.get("device", "")
+        if want:
+            dev = next((b for b in d if b.get("id") == want), None)
+            if not dev:
+                self.bg(painter, cr)
+                self.lines(painter, cr, self.p.get("device_name") or "Device", "not connected", self.t.FG_DIM)
+                return
+            d = [dev]
+        else:
+            d = [b for b in d if b.get("kind") != "laptop"] or d
+        low = any(b["pct"] < 15 and not b["charging"] for b in d)
+        fg = self.bg(painter, cr, self.t.ACCENT_RED if low and len(d) == 1 else None)
+        if len(d) == 1:
+            b = d[0]
+            state = " charging" if b["charging"] else " full" if b["full"] else ""
+            self.lines(painter, cr, f"{b['pct']:.0f} %{state}", b["name"], fg)
+            return
+        def colour(b):                          # red when low, green while charging, own colour wins
+            if self.color:
+                return None
+            return self.t.ACCENT_GREEN if b["charging"] else self.t.ACCENT_RED if b["pct"] < 15 else None
+        self.columns(painter, cr, [(f"{b['pct']:.0f} %", b["name"], colour(b)) for b in d], fg)
 
 
 class Weather(Online):

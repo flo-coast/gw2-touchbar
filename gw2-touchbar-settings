@@ -2,7 +2,7 @@
 """gw2-touchbar-settings: put the GW2 Touch Bar together. Pages of panels, each with its own width, colour,
 font size and style, a live preview of the real 2008x60 bar, and the general settings. Every change is
 saved to ~/.config/gw2-touchbar/config.toml right away and the running bar picks it up within 2 s.
-Text fields apply on Enter or when you leave them.
+Text fields are saved while you type, the watchlist on Enter or when you leave it.
 
 The app is also the bar's on/off switch. Nothing starts the bar at boot or when GW2 starts: switch it on here
 and it takes the Touch Bar whenever GW2 runs, close the app and tiny-dfr's F-keys are back."""
@@ -86,8 +86,12 @@ def sample_state():
         "music": {"status": "Playing", "title": "Fear Not This Night", "artist": "Asja Kadric", "app": "spotify",
                   "length": 240, "pos": 95},
         "notes": [{"app": "Discord", "summary": "Guild chat", "body": "raid in 10 at Lion's Arch", "t": now - 30}],
-        "battery": [{"kind": "mouse", "name": "G502", "pct": 34, "charging": False, "full": False},
-                    {"kind": "headset", "name": "Arctis", "pct": 71, "charging": False, "full": False}],
+        "battery": [{"id": "AA:00:00:00:00:01", "kind": "mouse", "name": "Mouse", "pct": 34, "charging": False,
+                     "full": False},
+                    {"id": "AA:00:00:00:00:02", "kind": "headphones", "name": "Headphones", "pct": 71,
+                     "charging": True, "full": False},
+                    {"id": "AA:00:00:00:00:03", "kind": "keyboard", "name": "Keyboard", "pct": 12, "charging": False,
+                     "full": False}],
         "weather": {"place": "Your town", "temp": 12, "sky": "partly cloudy", "min": 7, "max": 14, "wind": 9,
                     "rain": ["17:00", 60]},
         "scores": {"fav": "LAL", "games": [{"teams": [["LAL", "98", None], ["BOS", "95", None]], "state": "in",
@@ -173,8 +177,11 @@ class Settings(Gtk.ApplicationWindow):
         stack.set_vexpand(True)
         if os.environ.get("GW2TB_TAB"):            # self-test: open on this tab
             stack.set_visible_child_name(os.environ["GW2TB_TAB"])
+        if os.environ.get("GW2TB_PANEL"):          # self-test: select panel "page,index"
+            self.page, self.sel = (int(x) for x in os.environ["GW2TB_PANEL"].split(","))
 
         self.fill_pages()
+        self.fill_props()
         self.render()
         if not SELFTEST and self.cfg["settings"]["start_on_open"] and not bar_active():
             self.power.set_active(True)        # on_power starts it
@@ -245,11 +252,28 @@ class Settings(Gtk.ApplicationWindow):
         crow = Gtk.Box(spacing=8)
         crow.append(self.p_color_on)
         crow.append(self.p_color)
+        # sensors panel: which values, battery panel: which device
+        self.p_items = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3,
+                                   column_spacing=4, row_spacing=0, homogeneous=True)
+        self.p_item_checks = {}
+        for k in config.NUMS:
+            cb = Gtk.CheckButton(label=config.SHORT[k] if k != "gtemp" else "GPU temp")
+            cb.connect("toggled", self.on_items)
+            self.p_item_checks[k] = cb
+            self.p_items.append(cb)
+        self.p_device = Gtk.DropDown.new_from_strings(["All devices"])
+        self.p_device.connect("notify::selected", self.on_device)
+        self.device_choices = [("", "")]
         rows = [("Width (px)", self.p_width), ("Font size", self.p_size), ("Style", self.p_style),
-                ("Second line", self.p_sub), ("Own colour", crow)]
+                ("Second line", self.p_sub), ("Own colour", crow), ("Values", self.p_items),
+                ("Device", self.p_device)]
+        self.prop_rows = {}
         for i, (name, w) in enumerate(rows, 1):
-            grid.attach(label(name), 0, i, 1, 1)
+            lbl = label(name)
+            lbl.set_valign(Gtk.Align.START)
+            grid.attach(lbl, 0, i, 1, 1)
             grid.attach(w, 1, i, 1, 1)
+            self.prop_rows[name] = (lbl, w)
         self.props_hint = label("", "dim-label")
         self.props_hint.set_wrap(True)
         self.props_hint.set_max_width_chars(36)
@@ -285,7 +309,7 @@ class Settings(Gtk.ApplicationWindow):
         self.s_flip = Gtk.Switch(active=s["touch_flip"], halign=Gtk.Align.START)
         self.s_flip.connect("notify::active", lambda w, _p: self.set_setting("touch_flip", w.get_active()))
         self.s_mango = Gtk.Entry(text=s["mangohud_dir"], placeholder_text="found by itself", width_chars=40)
-        self.s_mango.connect("activate", lambda w: self.set_setting("mangohud_dir", w.get_text().strip()))
+        self.s_mango.connect("changed", lambda w: self.set_setting("mangohud_dir", w.get_text().strip()))
         self.s_onopen = Gtk.Switch(active=s["start_on_open"], halign=Gtk.Align.START)
         self.s_onopen.connect("notify::active", lambda w, _p: self.set_setting("start_on_open", w.get_active()))
         self.s_login = Gtk.Switch(active=os.path.exists(AUTOSTART), halign=Gtk.Align.START, sensitive=not SELFTEST)
@@ -297,7 +321,7 @@ class Settings(Gtk.ApplicationWindow):
                 ("Page dots", self.s_dots, "only shown with more than one page"),
                 ("Graphs show the last", self.s_graph, ""),
                 ("Mirror touch", self.s_flip, "only if taps land on the wrong side; next GW2 start"),
-                ("MangoHud log folder", self.s_mango, "for FPS, Enter to apply; empty finds it by itself")]
+                ("MangoHud log folder", self.s_mango, "for FPS, empty finds it by itself")]
         for i, (name, w, hint) in enumerate(rows):
             grid.attach(label(name), 0, i, 1, 1)
             grid.attach(w, 1, i, 1, 1)
@@ -314,7 +338,8 @@ class Settings(Gtk.ApplicationWindow):
             e.set_text(s[key])
             if placeholder and not secret:
                 e.set_placeholder_text(placeholder)
-            e.connect("activate", lambda w: self.set_setting(key, w.get_text().strip()))
+            # saved while you type (the save waits 400 ms), so a pasted key is kept without pressing Enter
+            e.connect("changed", lambda w: self.set_setting(key, w.get_text().strip()))
             return e
         self.o_key = entry("api_key", secret=True)
         self.o_key.set_hexpand(True)
@@ -322,6 +347,9 @@ class Settings(Gtk.ApplicationWindow):
         self.o_tp.set_text(", ".join(f"{w['id']}" + (f"@{online.parse_coins_text(w['target'])}" if w["target"] else "")
                                      for w in s["tp_watch"]))
         self.o_tp.connect("activate", self.on_tp)
+        leave = Gtk.EventControllerFocus()
+        leave.connect("leave", lambda *_: self.on_tp(self.o_tp))
+        self.o_tp.add_controller(leave)
         self.o_city = entry("weather_city", 24, placeholder="your town")
         self.o_league = entry("sports_league", 24, placeholder="basketball/nba")
         self.o_team = entry("sports_team", 8, placeholder="LAL")
@@ -330,9 +358,9 @@ class Settings(Gtk.ApplicationWindow):
         self.o_popup.connect("notify::active", lambda w, _p: self.set_setting("notify_popup", w.get_active()))
         self.o_status = label("", "dim-label")
         rows = [("GW2 API key", self.o_key, "account.arena.net/applications with account, wallet, progression and "
-                                            "tradingpost. Enter to apply. Stays on this computer."),
+                                            "tradingpost. Saved as you paste it and stays on this computer."),
                 ("Trading Post watchlist", self.o_tp, "chat links or item ids, comma separated, Enter to apply"),
-                ("Weather town", self.o_city, "Enter to apply"),
+                ("Weather town", self.o_city, ""),
                 ("Scores league", self.o_league, "ESPN path, e.g. basketball/nba, hockey/nhl, soccer/ger.1"),
                 ("Your team", self.o_team, "its short name, highlighted and shown first"),
                 ("Notifications", self.o_filter, "only these slide over the bar (a regular expression)"),
@@ -364,7 +392,7 @@ class Settings(Gtk.ApplicationWindow):
     def build_keys_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.append(label("The buttons the Keys panel opens. Keys are evdev names without KEY_, "
-                         "for example M, F1, LeftShift. Several keys are pressed together. Enter to apply.",
+                         "for example M, F1, LeftShift. Several keys are pressed together.",
                          "dim-label"))
         self.keys_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.append(Gtk.ScrolledWindow(child=self.keys_box, vexpand=True))
@@ -381,6 +409,9 @@ class Settings(Gtk.ApplicationWindow):
             keys = Gtk.Entry(text=" + ".join(k["keys"]), width_chars=30)
             for e in (name, keys):
                 e.connect("activate", lambda _e, i=i, n=name, ks=keys: self.set_key(i, n, ks))
+                leave = Gtk.EventControllerFocus()   # also when you click elsewhere, not only on Enter
+                leave.connect("leave", lambda *_a, i=i, n=name, ks=keys: self.set_key(i, n, ks))
+                e.add_controller(leave)
             rm = Gtk.Button(label="Remove")
             rm.connect("clicked", lambda _b, i=i: self.remove_key(i))
             for w in (label("Label"), name, label("Keys"), keys, rm):
@@ -389,8 +420,9 @@ class Settings(Gtk.ApplicationWindow):
 
     def set_key(self, i, name, keys):
         ks = [x.strip() for x in keys.get_text().replace(",", "+").split("+") if x.strip()]
-        if ks:
-            self.cfg["keys"][i] = {"label": name.get_text().strip() or "?", "keys": ks}
+        new = {"label": name.get_text().strip() or "?", "keys": ks}
+        if ks and i < len(self.cfg["keys"]) and self.cfg["keys"][i] != new:     # the row may be gone already
+            self.cfg["keys"][i] = new
             self.changed()
 
     def add_key(self, *_):
@@ -466,6 +498,10 @@ class Settings(Gtk.ApplicationWindow):
             c = config.CATALOG[p["type"]]
             w = f"{p['width']} px" if p["width"] else "fills"
             extra = [w] + ([p["style"]] if c.get("num") else []) + (["own colour"] if p["color"] else [])
+            if p["type"] == "sensors":
+                extra.insert(0, ", ".join(config.SHORT[k] for k in p["items"]) or "nothing picked")
+            elif p["type"] == "battery":
+                extra.insert(0, p["device_name"] or p["device"] or "all devices")
             self.panel_list.append(label(f"{c['title']}  ·  {' · '.join(extra)}"))
         if self.sel is not None and self.sel < len(self.panels):
             self.panel_list.select_row(self.panel_list.get_row_at_index(self.sel))
@@ -503,13 +539,70 @@ class Settings(Gtk.ApplicationWindow):
             rgba = Gdk.RGBA()
             rgba.parse(p["color"] or "#333333")
             self.p_color.set_rgba(rgba)
+            for name, on in (("Values", p["type"] == "sensors"), ("Device", p["type"] == "battery")):
+                for w in self.prop_rows[name]:
+                    w.set_visible(on)
+            if p["type"] == "sensors":
+                for k, cb in self.p_item_checks.items():
+                    cb.set_active(k in p["items"])
+                self.limit_items()
+            if p["type"] == "battery":
+                self.fill_devices(p)
             self.props_hint.set_text(
+                f"Up to {config.MAX_ITEMS} values side by side. Make the panel wider if they get cut off."
+                if p["type"] == "sensors" else
+                "All devices side by side, or pick one and add more battery panels for the others."
+                if p["type"] == "battery" else
                 "The colour is the panel's background (and its graph line). Panels that change colour by "
                 "themselves, like combat or a boss that's up, keep their own." if not c.get("num") else
                 "Graphs keep the last 30 s to 5 min, see Settings.")
         else:
             self.props_title.set_text("Select a panel (or click it in the preview)")
+            for name in ("Values", "Device"):
+                for w in self.prop_rows[name]:
+                    w.set_visible(False)
         self.busy = False
+
+    def on_items(self, *_):
+        if self.busy or self.sel is None:
+            return
+        p = self.panels[self.sel]
+        on = [k for k in config.NUMS if self.p_item_checks[k].get_active()]
+        p["items"] = [k for k in p.get("items", []) if k in on] + [k for k in on if k not in p.get("items", [])]
+        p["width"] = max(110, 105 * len(p["items"]) + 10)       # room for each value, adjust it after
+        self.busy = True
+        self.p_width.set_value(p["width"])
+        self.busy = False
+        self.limit_items()
+        self.fill_panels()
+        self.changed()
+
+    def limit_items(self):
+        full = sum(cb.get_active() for cb in self.p_item_checks.values()) >= config.MAX_ITEMS
+        for cb in self.p_item_checks.values():
+            cb.set_sensitive(cb.get_active() or not full)
+
+    def fill_devices(self, p):
+        """The device list: every device with a battery right now, plus the panel's own if it's away."""
+        devs = [d for d in online.Online.batteries(None) if "id" in d]
+        self.device_choices = [("", "All devices")] + [(d["id"], f"{d['name']} ({d['pct']:.0f} %)") for d in devs]
+        if p["device"] and p["device"] not in [i for i, _ in self.device_choices]:
+            self.device_choices.append((p["device"], f"{p['device_name'] or p['device']} (not connected)"))
+        self.p_device.set_model(Gtk.StringList.new([n for _, n in self.device_choices]))
+        self.p_device.set_selected([i for i, _ in self.device_choices].index(p["device"]))
+        self.device_names = {d["id"]: d["name"] for d in devs}
+
+    def on_device(self, dd, _p):
+        if self.busy or self.sel is None or self.panels[self.sel]["type"] != "battery":
+            return
+        i = dd.get_selected()
+        if i >= len(self.device_choices):
+            return
+        p = self.panels[self.sel]
+        p["device"] = self.device_choices[i][0]
+        p["device_name"] = self.device_names.get(p["device"], p.get("device_name", "")) if p["device"] else ""
+        self.fill_panels()
+        self.changed()
 
     def set_prop(self, key, value):
         if self.busy or self.sel is None:
@@ -601,6 +694,9 @@ class Settings(Gtk.ApplicationWindow):
         systemctl("stop", "--no-block", FEED, user=True)
 
     def on_close(self, *_):
+        if self.save_id:                       # a change from the last 400 ms is still waiting
+            GLib.source_remove(self.save_id)
+            self.save()
         self.power_off()
         return False                           # let the window close
 

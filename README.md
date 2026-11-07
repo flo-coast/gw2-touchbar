@@ -15,9 +15,10 @@ What you can put on a page
 
 - performance numbers like FPS with the 1 % low, ping, CPU and GPU clock, temperature and power, VRAM, fans, memory and network. Each one as a number, a graph of the last 30 s to 5 min, or both
 - the GW2 main thread, the usual culprit when the CPU looks idle but FPS drop
+- a sensors tile where you pick up to six of those values to sit side by side, like GPU temp, CPU clock and the main thread
 - character and map, combat timer (tap resets the session total), next world boss (tap copies its waypoint, a long press lists the next five), the event timeline, a run timer (tap to start and stop), playtime and your squad if you use the letterbox bridge in Nexus
 - with a GW2 API key your WvW matchup (victory points, skirmish, points per tick), session earnings in gold and currencies, the Wizard's Vault and a Trading Post watchlist with item icons, trends and a target price. The gem exchange works without a key
-- now playing from any player (tap to pause), the latest desktop notification, batteries of mouse and headset, the weather in your town and live scores from ESPN
+- now playing from any player (tap to pause), the latest desktop notification, the batteries of your Bluetooth devices and other gear, all in one tile or each in its own, the weather in your town and live scores from ESPN
 - the Keys group with game keys of your choice, a clock and empty space
 
 Discord notifications slide over the bar for 6 seconds, but never while you're in combat. Which ones is up to you in the settings.

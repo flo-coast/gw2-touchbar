@@ -18,6 +18,9 @@ GARBAGE = [
     {"pages": [{"panels": [{"type": ["fps"]}, {"type": {"a": 1}}, {"type": "fps", "width": "wide"},
                            {"type": "fps", "width": 99999, "size": -4, "color": "red", "style": 3},
                            {"type": "fps", "run": "rm -rf ~", "command": "x"}]}]},
+    {"pages": [{"panels": [{"type": "sensors", "items": ["gtemp", "rm -rf", 5, "cpu", "cpu"] + ["fps"] * 9},
+                           {"type": "sensors", "items": "gtemp"}, {"type": "battery", "device": ["x"]},
+                           {"type": "battery", "device": "A" * 500, "device_name": None}]}]},
 ]
 
 
@@ -34,7 +37,12 @@ def check(cfg):
     for pg in cfg["pages"]:
         assert set(pg) == {"name", "panels"} and isinstance(pg["name"], str)
         for p in pg["panels"]:
-            assert set(p) == {"type", "width", "color", "size", "style", "sub"}, p
+            extra = {"sensors": {"items"}, "battery": {"device", "device_name"}}.get(p["type"], set())
+            assert set(p) == {"type", "width", "color", "size", "style", "sub"} | extra, p
+            if p["type"] == "sensors":
+                assert len(p["items"]) <= config.MAX_ITEMS and all(i in config.NUMS for i in p["items"]), p
+            if p["type"] == "battery":
+                assert isinstance(p["device"], str) and isinstance(p["device_name"], str), p
             assert p["type"] in config.CATALOG and 0 <= p["width"] <= config.BAR_WIDTH
     return cfg
 
