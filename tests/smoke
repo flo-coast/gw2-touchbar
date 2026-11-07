@@ -61,6 +61,13 @@ EOF
     i=$((i + 1))
 done
 ctl next >/dev/null 2>&1; ctl prev >/dev/null 2>&1
+# the Keys group: open, its own button sits first and a tap on it closes the group again
+ctl page 0 >/dev/null 2>&1; sleep 0.3
+ctl group keys >/dev/null 2>&1; sleep 0.5
+ctl screenshot "$OUT/keys-open.png" >/dev/null 2>&1
+ctl status | grep -q '^group keys' || bad "keys group did not open"
+ctl touch 20,30 >/dev/null 2>&1; sleep 0.5
+ctl status | grep -q '^group -' && echo "ok    keys group closes on its own button" || bad "keys group stays open"
 kill -0 "$BAR" 2>/dev/null || bad "bar died"
 kill -0 "$FEED" 2>/dev/null || bad "feed died"
 
