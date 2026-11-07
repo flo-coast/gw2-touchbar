@@ -65,6 +65,9 @@ DEFAULT_KEYS = [
     {"label": "Map", "keys": ["M"]}, {"label": "Hero", "keys": ["H"]}, {"label": "Bags", "keys": ["I"]},
     {"label": "WvW", "keys": ["B"]}, {"label": "TP", "keys": ["O"]},
     {"label": "Mark", "keys": ["LeftMeta", "LeftShift", "M"]},
+    {"label": "Shot", "keys": ["SysRq"]},
+    # hide the UI (Ctrl+Shift+H), screenshot, UI back. ">" = one after another
+    {"label": "No HUD", "keys": ["LeftCtrl", "LeftShift", "H", ">", "SysRq", ">", "LeftCtrl", "LeftShift", "H"]},
 ]
 
 DEFAULT = {
@@ -156,7 +159,7 @@ def normalize(data):
     keys = []
     for k in _list(data.get("keys", DEFAULT_KEYS)):
         if isinstance(k, dict) and isinstance(k.get("keys"), list) and k["keys"]:
-            keys.append({"label": str(k.get("label", "?"))[:20], "keys": [str(x) for x in k["keys"]][:4]})
+            keys.append({"label": str(k.get("label", "?"))[:20], "keys": [str(x) for x in k["keys"]][:16]})
     pages = []
     for pg in _list(data.get("pages")) or DEFAULT["pages"]:
         if isinstance(pg, dict):

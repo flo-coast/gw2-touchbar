@@ -392,7 +392,7 @@ class Settings(Gtk.ApplicationWindow):
     def build_keys_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.append(label("The buttons the Keys panel opens. Keys are evdev names without KEY_, "
-                         "for example M, F1, LeftShift. Several keys are pressed together.",
+                         "for example M, F1, LeftShift. Several keys are pressed together, > presses them one after another.",
                          "dim-label"))
         self.keys_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.append(Gtk.ScrolledWindow(child=self.keys_box, vexpand=True))
@@ -406,7 +406,7 @@ class Settings(Gtk.ApplicationWindow):
         for i, k in enumerate(self.cfg["keys"]):
             row = Gtk.Box(spacing=8)
             name = Gtk.Entry(text=k["label"], width_chars=12)
-            keys = Gtk.Entry(text=" + ".join(k["keys"]), width_chars=30)
+            keys = Gtk.Entry(text=" + ".join(k["keys"]).replace(" + > + ", " > "), width_chars=50)
             for e in (name, keys):
                 e.connect("activate", lambda _e, i=i, n=name, ks=keys: self.set_key(i, n, ks))
                 leave = Gtk.EventControllerFocus()   # also when you click elsewhere, not only on Enter
@@ -419,7 +419,12 @@ class Settings(Gtk.ApplicationWindow):
             self.keys_box.append(row)
 
     def set_key(self, i, name, keys):
-        ks = [x.strip() for x in keys.get_text().replace(",", "+").split("+") if x.strip()]
+        text = keys.get_text().replace(",", "+").replace(">", "+>+")
+        ks = [x.strip() for x in text.split("+") if x.strip()]
+        while ks and ks[0] == ">":
+            ks.pop(0)
+        while ks and ks[-1] == ">":
+            ks.pop()
         new = {"label": name.get_text().strip() or "?", "keys": ks}
         if ks and i < len(self.cfg["keys"]) and self.cfg["keys"][i] != new:     # the row may be gone already
             self.cfg["keys"][i] = new
